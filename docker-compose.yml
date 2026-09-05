@@ -1,0 +1,48 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      # Two listeners: PLAINTEXT for other containers on the compose network
+      # (e.g. the containerized backend, via service DNS "redpanda"), OUTSIDE
+      # for a host-run backend/tooling (see backend/.env's KAFKA_BOOTSTRAP_SERVERS).
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092,OUTSIDE://localhost:19092
+    ports:
+      - "9092:9092"
+      - "19092:19092"
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      UPSTOX_API_KEY: ${UPSTOX_API_KEY:-}
+      UPSTOX_API_SECRET: ${UPSTOX_API_SECRET:-}
+      UPSTOX_REDIRECT_URI: ${UPSTOX_REDIRECT_URI:-http://localhost:8000/auth/callback}
+      SESSION_SECRET: ${SESSION_SECRET:-change-me}
+      DATABASE_URL: sqlite:///./data/app.db
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    volumes:
+      - backend-data:/app/data
+    depends_on:
+      - redpanda
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8000}
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  backend-data:

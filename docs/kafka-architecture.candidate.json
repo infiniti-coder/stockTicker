@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "stockTicker Kafka Tick Pipeline",
+    "output": "kafka-architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "browserA", "type": "external", "label": "Browser A", "sublabel": "session_id A (localStorage)", "pos": [40, 60], "size": [180, 60] },
+    { "id": "wsA", "type": "backend", "label": "ws consumer A", "sublabel": "own Kafka group: ws-<uuid-A>", "pos": [920, 60], "size": [210, 60] },
+    { "id": "backend", "type": "backend", "label": "FastAPI backend", "sublabel": "REST + MockTickProducer, single process", "pos": [360, 300], "size": [210, 64] },
+    { "id": "kafka", "type": "messagebus", "label": "market-ticks", "sublabel": "Redpanda topic, keyed by instrument", "pos": [640, 300], "size": [190, 64] },
+    { "id": "browserB", "type": "external", "label": "Browser B", "sublabel": "session_id B (localStorage)", "pos": [40, 560], "size": [180, 60] },
+    { "id": "wsB", "type": "backend", "label": "ws consumer B", "sublabel": "own Kafka group: ws-<uuid-B>", "pos": [920, 560], "size": [210, 60] },
+    { "id": "sqlite", "type": "database", "label": "SQLite", "sublabel": "session-scoped watchlist + snapshots", "pos": [660, 160], "size": [210, 64] }
+  ],
+  "connections": [
+    { "id": "browserA-rest", "from": "browserA", "to": "backend", "label": "REST: watchlist (session A)", "variant": "emphasis" },
+    { "id": "browserB-rest", "from": "browserB", "to": "backend", "label": "REST: watchlist (session B)", "variant": "emphasis" },
+    { "id": "backend-sqlite", "from": "backend", "to": "sqlite", "label": "watchlist CRUD", "variant": "default" },
+    { "id": "backend-kafka-publish", "from": "backend", "to": "kafka", "label": "publish: tick every symbol, ~1.5s", "variant": "emphasis", "labelDy": 67 },
+    { "id": "kafka-backend-persist", "from": "kafka", "to": "backend", "label": "consume (own group) -> upsert snapshot", "variant": "default", "labelDy": 49 },
+    { "id": "kafka-wsA", "from": "kafka", "to": "wsA", "label": "consume (own group)", "variant": "emphasis", "labelDy": -45 },
+    { "id": "kafka-wsB", "from": "kafka", "to": "wsB", "label": "consume (own group)", "variant": "emphasis" },
+    { "id": "wsA-browserA", "from": "wsA", "to": "browserA", "label": "WS: ticks filtered to A's watchlist", "variant": "emphasis" },
+    { "id": "wsB-browserB", "from": "wsB", "to": "browserB", "label": "WS: ticks filtered to B's watchlist", "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Tick pipeline", "items": ["MockTickProducer (inside the backend process) ticks every mock instrument continuously, no watchlist or market hours involved", "One Kafka topic, keyed by instrument_key, always publishing regardless of who's connected"] },
+    { "dot": "emerald", "title": "Per-browser fan-out", "items": ["Every WebSocket connection opens its own Kafka consumer group (ws-<uuid>)", "Each reads the full stream independently and filters client-side to that browser's watchlist"] },
+    { "dot": "amber", "title": "Session-scoped watchlist", "items": ["X-Session-Id header (a UUID the frontend keeps in localStorage) scopes REST watchlist reads/writes", "Two browser profiles never see each other's list; two tabs of the same profile do"] }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "stockTicker Runtime Architecture",
+    "output": "architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "browser", "type": "external", "label": "Browser", "sublabel": "user", "pos": [40, 260], "size": [130, 60] },
+    { "id": "frontend", "type": "frontend", "label": "React + TS SPA", "sublabel": "Vite :5173", "pos": [270, 260], "size": [150, 60] },
+    { "id": "backend", "type": "backend", "label": "FastAPI Backend", "sublabel": "single process :8000", "pos": [560, 260], "size": [160, 60] },
+    { "id": "upstox_ws", "type": "external", "label": "Upstox Market Data Feed", "sublabel": "protobuf WS (wss)", "pos": [850, 260], "size": [170, 60] },
+    { "id": "sqlite", "type": "database", "label": "SQLite", "sublabel": "watchlist, instruments, snapshots", "pos": [560, 420], "size": [190, 64] }
+  ],
+  "connections": [
+    { "id": "browser-to-frontend", "from": "browser", "to": "frontend", "label": "HTTPS", "variant": "emphasis" },
+    { "id": "frontend-to-backend-rest", "from": "frontend", "to": "backend", "label": "REST: search, watchlist CRUD", "variant": "emphasis", "labelDy": -31 },
+    { "id": "backend-subscribe", "from": "backend", "to": "upstox_ws", "label": "authorize + subscribe (instrumentKeys)", "variant": "dashed", "labelAt": [785, 256] },
+    { "id": "upstox-ticks", "from": "upstox_ws", "to": "backend", "label": "live ticks: LTP + depth (protobuf)", "variant": "emphasis", "labelAt": [785, 334] },
+    { "id": "backend-to-frontend-ws", "from": "backend", "to": "frontend", "label": "WS /ws/prices: fan-out ticks (JSON)", "variant": "emphasis", "labelDy": 61 },
+    { "id": "backend-to-sqlite", "from": "backend", "to": "sqlite", "label": "persist watchlist + last-known snapshot", "variant": "default", "fromSide": "bottom", "toSide": "top", "labelDy": 24 }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Client", "items": ["React + TypeScript SPA served by Vite", "Subscribes to /ws/prices for live rows"] },
+    { "dot": "emerald", "title": "Server", "items": ["Single FastAPI process owns one authenticated Upstox WS connection", "Fans out ticks to every connected browser client"] },
+    { "dot": "amber", "title": "Persistence", "items": ["SQLite holds the watchlist, cached instrument master, and last-known price snapshots", "Snapshots back a meaningful price even when the market is closed"] }
+  ]
+}

@@ -233,5 +233,17 @@ consent, and add symbols to your watchlist.
 
 ## 11. Status
 
-Planning stage — no code yet. This README reflects the architecture agreed
-on so far. Next step: scaffold `backend/` and `frontend/` per §7.
+Scaffolded and running end-to-end (backend + frontend, tests passing) per
+the architecture in §3, against the built-in **mock Upstox client** — see
+`backend/README.md`. No real Upstox account is wired up yet.
+
+Next steps:
+
+- Complete the Upstox developer app signup (§5) and drop real credentials
+  into `backend/.env` — the app switches from mock to live automatically
+  (`get_upstox_client()` picks based on whether credentials are present).
+- Swap the mock instrument fixtures for the real NSE instrument master
+  download (`RealUpstoxClient.get_instruments` already implements this; it
+  just isn't exercised until real credentials are set).
+- Smoke-test the real protobuf WS feed and OAuth flow against a live
+  Upstox account during market hours.

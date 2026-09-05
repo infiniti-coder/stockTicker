@@ -1,0 +1,20 @@
+# Python
+backend/.venv/
+backend/__pycache__/
+**/__pycache__/
+*.pyc
+backend/data/
+backend/.env
+backend/app/upstox_client/proto/__pycache__/
+backend/app/upstox_client/proto/MarketDataFeed_pb2.py
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
