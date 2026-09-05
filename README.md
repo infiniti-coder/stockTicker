@@ -1,249 +1,282 @@
 # stockTicker
 
-A personal, production-grade dashboard that shows **live bid/ask prices** for a
-watchlist of NSE equities, backed by your own Upstox demat account — and
-still shows meaningful (last-known) prices when the market is closed instead
-of going blank.
+A personal market dashboard: a live-updating watchlist backed by a mock
+Kafka tick feed, a real-data market-overview treemap (yfinance), an
+"Ask Claude" research chat, and a multi-step autonomous stock screener
+agent — all in one React + FastAPI app.
 
-> ⚠️ **Personal-use tool, not financial advice.** This app displays market
-> data from your authenticated Upstox account for informational purposes. It
-> does not place orders. Market data is subject to Upstox's terms of use and
-> exchange data policies.
+> ⚠️ **Personal/portfolio project, not financial advice.** Live prices are
+> synthetic (see §2). Market-overview, chat, and screener data comes from
+> Yahoo Finance and the public web. Nothing in this app recommends buying
+> or selling anything, and nothing here should be treated as investment
+> advice.
 
 ---
 
 ## 1. What this is
 
-- Search NSE equities and build a **watchlist**.
-- See **live LTP, bid, ask, bid/ask quantity** (market depth) for every symbol
-  in the watchlist, streamed over WebSocket during market hours.
-- **Always shows a price** — pre-market, after-hours, weekends, and
-  exchange holidays all fall back to the last known traded price instead of
-  an empty/blank row (clearly labeled as "closed" data, never silently
-  passed off as live).
-- Auth against **your own Upstox account** via OAuth2 — you click "Login with
-  Upstox" once a day (Upstox access tokens are valid for a single trading day
-  and don't support silent refresh).
+- **Watchlist with live prices** — search instruments, add them to a
+  per-browser watchlist, and see prices update in real time over
+  WebSocket. Every browser tab is a fully independent subscriber (see §2)
+  and its own watchlist (see §3) — nothing is shared across tabs/devices.
+- **Market overview** — a treemap of real equities (India or worldwide),
+  sized by market cap and colored by return over a selectable period,
+  filterable by sector or by a few curated themes (AI, Green Energy,
+  Oil). Click any tile to see that stock's full price history from
+  inception as a line chart.
+- **Ask Claude** — a chat panel, persistent per browser, for grounded
+  questions about specific stocks or how they compare (price moves,
+  fundamentals, sector context). Every answer cites up to 5 trusted
+  sources and never gives buy/sell advice.
+- **Screener agent** — a dedicated page where you describe open-ended
+  criteria in plain English and an autonomous agent decides its own
+  research depth: it screens the full universe, shortlists against your
+  criteria, digs deeper into up to 6 candidates, and returns a ranked
+  shortlist of up to 5 — see §5.
 
-## 2. Why Upstox instead of yfinance
+## 2. Live prices: mock feed over Kafka, one consumer per browser
 
-`yfinance` scrapes an unofficial Yahoo endpoint: no streaming, delayed data
-on many symbols, and bid/ask fields are frequently stale or empty. Upstox, by
-contrast, gives an **authenticated, real-time Market Data Feed** (WebSocket,
-protobuf-encoded) with genuine top-of-book bid/ask, because you're pulling
-data through your own broker account with actual exchange entitlements.
+There's no live broker connection. A backend-side `MockTickProducer`
+generates synthetic ticks for a fixed instrument universe and publishes
+them to a `market-ticks` topic on Kafka (Redpanda locally). From there:
 
-Trade-off: this ties the app to one broker and one user (you), and requires
-a daily login instead of a "just works, no account" setup.
+- A **`backend-persistence`** consumer group persists every tick to
+  SQLite (`last_snapshots`), so a price is always available even before
+  any browser connects, or after a restart.
+- **Each `/ws/prices` WebSocket connection creates its own Kafka consumer
+  group** (`ws-<uuid>`), independently reading the entire tick stream and
+  filtering client-side to whatever that browser has subscribed to. Two
+  browser tabs on the same watchlist genuinely get two independent
+  feeds — there's no shared in-process broadcaster fanning out to
+  clients. This only works because there's no real upstream broker
+  connection limit to conserve, unlike a real feed provider — see the
+  detailed diagram in `docs/kafka-architecture.html`.
 
----
+The app previously integrated with the real Upstox Market Data Feed
+(protobuf WebSocket, OAuth login, real NSE entitlements). That
+integration is retained in the codebase (`app/upstox_client/real_client.py`,
+the `/auth/*` OAuth routes) but is currently unreferenced —
+`get_upstox_client()` always returns the mock client. Swapping back is a
+one-line change if real market data is wanted again.
 
-## 3. Architecture
+## 3. Per-browser identity: session id, not login
 
-```
-┌──────────────────┐        OAuth2 login/callback        ┌──────────────────────┐
-│                   │ ───────────────────────────────────▶│                      │
-│  React + TS SPA   │                                      │   FastAPI backend    │
-│  (frontend)       │◀──────────── REST (search, ─────────│   (single process)   │
-│                   │              watchlist CRUD)         │                      │
-│                   │                                      │  ┌────────────────┐  │
-│                   │◀════ WebSocket (live prices) ═══════▶│  │ Upstox WS client│──┼──▶ Upstox Market
-└──────────────────┘        /ws/prices                     │  │ (one connection)│  │    Data Feed (wss)
-                                                              │  └────────────────┘  │
-                                                              │  SQLite (watchlist,  │
-                                                              │  cached instrument   │
-                                                              │  master, last-known  │
-                                                              │  price snapshots)    │
-                                                              └──────────────────────┘
-```
+There's no user database or real authentication. On first load, the
+frontend generates a UUID (`crypto.randomUUID()`), stores it in
+`localStorage`, and sends it as an `X-Session-Id` header on every
+request. The backend uses that id to scope:
 
-Key design point: the backend holds **one** authenticated WebSocket
-connection to Upstox and **fans out** updates to however many browser tabs/
-clients are connected, filtered to what each client has subscribed to. This
-respects Upstox's connection limits and keeps the frontend simple (plain JSON
-over WebSocket, no protobuf in the browser).
+- the **watchlist** (`watchlist_items.session_id`) — each browser only
+  ever sees rows it created;
+- the **chat history** (`chat_messages.session_id`) — the Ask Claude
+  panel picks up where you left off on the same browser, with no login.
 
-### Data flow
+Clearing `localStorage` (or opening a different browser) starts a fresh,
+empty session.
 
-1. User clicks **Login with Upstox** → backend redirects to Upstox's OAuth
-   authorization dialog.
-2. User authenticates with Upstox (credentials + TOTP) and grants consent.
-3. Upstox redirects back to the backend's callback URL with an auth `code`.
-4. Backend exchanges the `code` for an **access token** (valid until ~3:30am
-   IST the next day) and holds it server-side for the session.
-5. Backend calls Upstox's feed-authorize endpoint to get a signed WebSocket
-   URL, connects, and subscribes in **`full`** mode (LTP + market depth) for
-   every instrument currently on the watchlist.
-6. Upstox pushes protobuf-encoded ticks; backend decodes them and re-emits a
-   small JSON payload (`{instrument_key, ltp, bid, ask, bid_qty, ask_qty, ts}`)
-   to every connected frontend client subscribed to that instrument.
-7. Frontend updates the relevant watchlist row in place — no full reload.
+## 4. Market overview: real data, real sectors
 
-### Data availability: live vs last-known
+`app/market_overview/` pulls real quotes via `yfinance` for a curated
+India/worldwide equity universe (`universe.py`): market cap, sector,
+industry, and return over the selected period, batched with
+`yf.download(..., group_by="ticker")` plus a threaded `.info` fetch per
+ticker for fundamentals. The treemap sizes tiles by market cap and colors
+them red/green by return; filters include every real sector present in
+the fetched data plus three curated cross-sector themes
+(`app/market_overview/themes.py`: AI, Green Energy, Oil — approximated
+from sector/industry strings, not a real thematic classifier). Clicking a
+tile fetches that symbol's full history via `yf.download(symbol,
+period="max")` and renders it as a line chart.
 
-Upstox's feed only ticks during NSE trading hours (09:15–15:30 IST,
-weekdays, excluding exchange holidays). Outside that window there is
-nothing to stream — but the UI should never just go blank. Design:
+## 5. Ask Claude & the screener agent
 
-- **Persist every tick.** Every price update the backend receives is
-  upserted into a `last_snapshot` table in SQLite (`instrument_key`, `ltp`,
-  `bid`, `ask`, `bid_qty`, `ask_qty`, `close`, `ts`, `is_live`). This
-  survives backend restarts, not just in-memory state.
-- **Snapshot-first API.** Adding a symbol to the watchlist, or opening the
-  app, immediately returns whatever is in `last_snapshot` (via REST and as
-  the first WebSocket message) — even before/without a live feed connection.
-  No row is ever empty once a symbol has been quoted at least once.
-- **Backfill on cold start / new symbol.** If a symbol has no snapshot yet
-  (freshly added, backend never fetched it), the backend calls Upstox's
-  REST **Quote/LTP API** once — this endpoint returns the previous close and
-  last traded price even when the market is closed, unlike the WS feed.
-- **Market-hours awareness.** A small `market_status` util (weekday +
-  NSE holiday calendar, refreshed periodically from Upstox's holiday
-  endpoint) determines whether the WS feed *should* be ticking right now.
-  The backend only opens the Upstox WS connection during trading hours (no
-  point holding an idle connection all night) and reconnects automatically
-  at the next session open.
-- **Explicit staleness in the UI.** Every price row carries `is_live` and
-  `ts`. The frontend shows a small badge — "Live" (green, updating) vs
-  "Market closed · as of last close / HH:MM" (grey) — so last-known data is
-  never mistaken for a live quote.
+Both features call Claude (`claude-opus-5` via the Anthropic SDK's
+`tool_runner`) with two tools: `get_stock_data` (reuses the same
+yfinance-backed market-overview data, plus per-stock fundamentals like
+margins/PE/ROE) and `web_search` (server-side web search, ranked and
+capped to the 5 most trusted financial-publisher domains — see
+`app/chat/sourcing.py`). Both share one `HARD_RULES` prompt constant:
+never recommend buying or selling, never claim to predict or prove
+future prices, ground every claim in a named tool result, and end with a
+non-advice disclaimer. Answers stream to the frontend over SSE.
 
----
+They differ in shape, not mechanism:
 
-## 4. Tech stack
+| | Ask Claude (`/chat`) | Screener (`/screener`) |
+|---|---|---|
+| Input | One question at a time | Open-ended free-text criteria + region |
+| Process | Bounded: a couple of tool calls, then answer | Model-driven: screen the full universe → shortlist → deep-dive up to 6 candidates → rank up to 5, deciding its own step count |
+| Output | 2 paragraphs by default (more on request) | A ranked shortlist with a rationale per stock |
+| Persistence | Saved per session, chat history reloads | Stateless — one run, no history |
+| Safety cap | — | `max_iterations=15` on the tool runner, hard stop against a runaway loop |
 
-| Layer            | Choice                          | Notes |
-|-------------------|----------------------------------|-------|
-| Backend framework | **FastAPI** (Python, async)     | native WebSocket support, auto OpenAPI docs |
-| Upstream feed     | **Upstox Market Data Feed v3**  | protobuf over WebSocket, requires compiled `.proto` stubs |
-| Realtime transport (backend ⇄ browser) | **WebSocket** | one connection per client, JSON messages |
-| Persistence       | **SQLite** (via SQLAlchemy)     | watchlist + cached instrument master; upgrade path to Postgres if ever multi-user |
-| Frontend          | **React + TypeScript**          | Vite for dev/build |
-| Frontend state    | React Query (REST) + a small store (Zustand/Context) for live price state | |
-| Auth              | **Upstox OAuth2**, server-held access token | no user database — single-user tool |
-| Deployment        | Docker Compose (backend + frontend, or backend serving built frontend) | see §8 |
+Both require `ANTHROPIC_API_KEY`; without it, those two features fail
+gracefully (the rest of the app works fine either way).
 
 ---
 
-## 5. Upstox app setup (one-time, manual)
-
-Since you don't yet have API credentials, do this before writing code:
-
-1. Go to <https://developer.upstox.com> and log in with your Upstox account.
-2. Create a new app:
-   - **App name**: anything, e.g. `trading-engine-dev`
-   - **Redirect URI**: `http://localhost:8000/auth/callback` (must match
-     exactly what the backend uses — add a second one for production later)
-3. Note the **API Key (Client ID)** and **API Secret** issued.
-4. Read the current rate limits and WebSocket connection limits in the
-   [Upstox API docs](https://upstox.com/developer/api-documentation) — these
-   change occasionally and affect how aggressively we can subscribe/poll.
-5. Download the Market Data Feed `.proto` definition from Upstox's docs and
-   compile it with `protoc` into Python stubs (checked into
-   `backend/app/upstox_client/proto/` as a build step, not committed as
-   generated code).
-
-## 6. Environment variables
+## 6. Architecture
 
 ```
-UPSTOX_API_KEY=...
-UPSTOX_API_SECRET=...
-UPSTOX_REDIRECT_URI=http://localhost:8000/auth/callback
-SESSION_SECRET=...          # for signing the backend session cookie
-DATABASE_URL=sqlite:///./data/app.db
+┌───────────────────┐   REST: search, watchlist, market-overview,   ┌───────────────────────────┐
+│  React + TS SPA    │   chat, screener  (X-Session-Id header)      │      FastAPI backend       │
+│  (frontend)        │──────────────────────────────────────────────▶                            │
+│                     │                                              │  market_overview/ (yfinance)│
+│                     │◀════ WebSocket /ws/prices (live ticks) ═════▶│  chat/, screener/ (Claude)  │
+└───────────────────┘   one Kafka consumer group per connection      │  watchlist/, ws_gateway/    │
+                                                                       └─────────────┬──────────────┘
+                                                                                     │
+                                                          ┌──────────────────────────┼───────────────────────┐
+                                                          │                          │                       │
+                                                ┌─────────▼─────────┐   ┌────────────▼───────────┐  ┌────────▼────────┐
+                                                │ MockTickProducer   │   │ Kafka / Redpanda topic  │  │ SQLite           │
+                                                │ (synthetic ticks)  │──▶│ "market-ticks"          │  │ watchlist_items  │
+                                                └────────────────────┘   └────────────┬────────────┘  │ last_snapshots   │
+                                                                                       │               │ chat_messages    │
+                                                                          ┌────────────▼────────────┐  └──────────────────┘
+                                                                          │ backend-persistence      │
+                                                                          │ consumer → last_snapshots│
+                                                                          └──────────────────────────┘
 ```
 
----
+See `docs/kafka-architecture.html` for a more detailed view of the tick
+pipeline and per-browser fan-out. (`docs/architecture.html` predates this
+pivot and describes the old real-Upstox-only design — kept for history,
+not current.)
 
-## 7. Project structure (planned)
+## 7. Tech stack
+
+| Layer | Choice | Notes |
+|---|---|---|
+| Backend framework | **FastAPI** (Python, async) | native WebSocket support, auto OpenAPI docs |
+| Live tick pipeline | **Kafka** (aiokafka) on **Redpanda** | one mock producer, one persistence consumer group, one consumer group per browser WebSocket |
+| Market data | **yfinance** | market-overview treemap, per-stock fundamentals, full price history |
+| AI | **Anthropic Claude API** (`claude-opus-5`), `tool_runner`, server-side web search | powers Ask Claude + the screener agent, streamed via SSE |
+| Persistence | **SQLite** (SQLAlchemy) | watchlist, last-known price snapshots, chat history — all session-scoped |
+| Frontend | **React + TypeScript**, Vite | |
+| Frontend state | **React Query** (REST) + a WebSocket hook for live price state | |
+| Identity | Client-generated `X-Session-Id` (localStorage UUID) | no real login; a legacy Upstox OAuth flow exists but runs against the mock client |
+| Deployment | Docker Compose (Redpanda + backend + frontend) | |
+
+## 8. Project structure
 
 ```
 stockTicker/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                 # FastAPI app, router wiring
-│   │   ├── auth/                   # OAuth login/callback, token storage
-│   │   ├── upstox_client/          # REST client + WS market feed client, proto stubs
-│   │   ├── instruments/            # instrument master download/cache/search
-│   │   ├── watchlist/              # CRUD for watchlist symbols (SQLite)
-│   │   ├── market_status/          # trading-hours + holiday-calendar checks
+│   │   ├── main.py                 # FastAPI app, router + lifespan wiring
+│   │   ├── auth/                   # legacy OAuth login/callback (runs against the mock client)
+│   │   ├── upstox_client/          # mock client (active) + real client (retained, unreferenced)
+│   │   ├── instruments/            # instrument search/cache
+│   │   ├── watchlist/              # session-scoped watchlist CRUD
+│   │   ├── market_status/          # trading-hours/holiday checks
+│   │   ├── market_data/            # Kafka topic, producer, persistence consumer
+│   │   ├── ws_gateway/             # /ws/prices — per-connection Kafka consumer group
 │   │   ├── snapshots/              # last-known price persistence + REST backfill
-│   │   └── ws_gateway/             # browser-facing /ws/prices, fan-out logic
+│   │   ├── market_overview/        # yfinance-backed treemap + per-stock history
+│   │   ├── chat/                   # "Ask Claude" — prompts, tools, sourcing, streaming service
+│   │   ├── screener/               # multi-step screener agent
+│   │   └── session.py              # X-Session-Id dependency
 │   ├── tests/
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
 │   ├── src/
-│   │   ├── components/             # WatchlistTable, SymbolSearch, PriceCell, LoginButton
-│   │   ├── hooks/                  # useLivePrices (WebSocket), useWatchlist (REST)
-│   │   └── pages/
+│   │   ├── components/             # WatchlistTable, SymbolSearch, MarketOverviewTreemap,
+│   │   │                           # StockHistoryChart, ChatPanel, StreamedAnswer, ...
+│   │   ├── hooks/                  # useLivePrices, useWatchlist, useMarketOverview,
+│   │   │                           # useStockHistory, useChatHistory
+│   │   ├── api/                    # REST/SSE client, session id
+│   │   └── pages/                  # Dashboard, MarketStockDetailPage, ScreenerPage, ...
 │   ├── package.json
 │   └── vite.config.ts
-├── docker-compose.yml
+├── docker-compose.yml               # Redpanda + backend + frontend
+├── docs/                            # archify-generated architecture diagrams
 ├── CLAUDE.md
 └── README.md
 ```
 
----
+## 9. Environment variables
 
-## 8. Local development (once scaffolded)
+Backend (`backend/.env`, see `backend/.env.example`):
+
+```
+KAFKA_BOOTSTRAP_SERVERS=localhost:19092   # Redpanda's host-exposed listener
+KAFKA_ENABLED=true                        # false skips the tick producer/consumers (used by tests)
+ANTHROPIC_API_KEY=                        # required for Ask Claude + the screener; rest of app works without it
+DATABASE_URL=sqlite:///./data/app.db
+SESSION_SECRET=change-me-to-a-random-string
+
+# Unused (real Upstox integration retained but not wired up):
+UPSTOX_API_KEY=
+UPSTOX_API_SECRET=
+UPSTOX_REDIRECT_URI=http://localhost:8000/auth/callback
+```
+
+Frontend (`frontend/.env`, see `frontend/.env.example`):
+
+```
+VITE_API_BASE=http://localhost:8000
+```
+
+## 10. Local development
 
 ```bash
-# backend
+# 1. start Redpanda (needed for live prices; skip if you set KAFKA_ENABLED=false)
+docker compose up redpanda
+
+# 2. backend
 cd backend
 python -m venv .venv && .venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env          # add ANTHROPIC_API_KEY if you want Ask Claude / the screener
 uvicorn app.main:app --reload
 
-# frontend
+# 3. frontend
 cd frontend
 npm install
 npm run dev
 ```
 
-Then open the frontend, click **Login with Upstox**, complete the OAuth
-consent, and add symbols to your watchlist.
+Then open the frontend — the watchlist, market overview, chat, and
+screener all work immediately with no login required.
+
+Or run everything via Docker Compose:
+
+```bash
+docker compose up
+```
+
+## 11. Known limitations
+
+- **Prices are synthetic** — `/ws/prices` streams a mock feed, not a real
+  exchange feed. The real Upstox integration is retained in the codebase
+  but currently unreferenced (see §2).
+- **`yfinance` data drift** — a hand-maintained equity universe
+  (`app/market_overview/universe.py`) occasionally includes a delisted or
+  renamed symbol; it's silently skipped rather than erroring.
+- **Ask Claude / screener require `ANTHROPIC_API_KEY`** — without it,
+  those two endpoints return an error; the rest of the app is unaffected.
+- **No real authentication** — per-browser identity is a `localStorage`
+  UUID, not a login. Clearing site data or switching browsers starts a
+  fresh, empty watchlist and chat history.
+- **Theme tagging is approximate** — AI/Green Energy/Oil filters are
+  derived from Yahoo's sector/industry strings, not a real thematic
+  classification (see §4).
+
+## 12. Roadmap ideas (not committed yet)
+
+- Wire the real Upstox client back in as an opt-in live-data mode.
+- Persist screener runs so past shortlists can be revisited.
+- Alerting (price crosses threshold) via the existing Kafka pipeline.
 
 ---
 
-## 9. Known limitations
+## 13. Status
 
-- **Daily re-login required** — Upstox access tokens expire once a day; no
-  silent refresh, so the app will prompt you to log in again each trading
-  day (or when a token-expired error is detected).
-- **Single user** — this is built around one Upstox account. Multi-user
-  support would require per-user token storage and a real auth layer.
-- **NSE equity only** for the MVP — F&O/BSE support is a possible future
-  extension, not in scope initially.
-- **Market hours** — live depth only updates during NSE trading hours; outside
-  that window the app intentionally falls back to last-known data (see
-  §3, "Data availability: live vs last-known") rather than a live feed.
-- **Holiday calendar freshness** — the exchange holiday list is fetched
-  periodically, not hardcoded forever; if it goes stale, the app may briefly
-  attempt to open a WS connection on a holiday and simply get no ticks (falls
-  back to last-known automatically, no user-facing error).
-
-## 10. Roadmap ideas (not committed yet)
-
-- Persist historical ticks for simple intraday charting.
-- Alerting (price crosses threshold) via the existing WS pipeline.
-- Multi-account support if this ever needs to serve more than one user.
-
----
-
-## 11. Status
-
-Scaffolded and running end-to-end (backend + frontend, tests passing) per
-the architecture in §3, against the built-in **mock Upstox client** — see
-`backend/README.md`. No real Upstox account is wired up yet.
-
-Next steps:
-
-- Complete the Upstox developer app signup (§5) and drop real credentials
-  into `backend/.env` — the app switches from mock to live automatically
-  (`get_upstox_client()` picks based on whether credentials are present).
-- Swap the mock instrument fixtures for the real NSE instrument master
-  download (`RealUpstoxClient.get_instruments` already implements this; it
-  just isn't exercised until real credentials are set).
-- Smoke-test the real protobuf WS feed and OAuth flow against a live
-  Upstox account during market hours.
+Fully running end-to-end: mock live prices over Kafka/Redpanda with
+per-browser consumer groups, a session-scoped watchlist, a real-data
+market-overview treemap, per-stock history charts, an "Ask Claude" chat
+panel, and a multi-step screener agent — all covered by a passing test
+suite (`cd backend && pytest`). See `backend/README.md` for backend-only
+setup notes.
