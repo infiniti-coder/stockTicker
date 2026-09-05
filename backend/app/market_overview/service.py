@@ -47,9 +47,16 @@ def _fetch_info(symbol: str) -> dict:
     return info or {}
 
 
-def fetch_region_overview(tickers: list[str]) -> list[dict]:
+def fetch_region_overview(tickers: list[str], extra_info_fields: tuple[str, ...] = ()) -> list[dict]:
     """Synchronous, network-bound — call via asyncio.to_thread from the
-    router so it never blocks the event loop the Kafka consumers run on."""
+    router so it never blocks the event loop the Kafka consumers run on.
+
+    extra_info_fields: optional raw yfinance `.info` keys (already fetched
+    for sector/industry/market_cap below, at no extra network cost) to
+    include under a "fundamentals" key per stock. Omitted by default so the
+    treemap's response shape is unchanged; app/chat/tools.py passes a
+    curated list so the chat/screener agents can ground claims like
+    "improving margins" in real numbers instead of only web-search prose."""
     history = yf.download(tickers, period="5y", interval="1d", group_by="ticker", progress=False, threads=True)
 
     with ThreadPoolExecutor(max_workers=INFO_FETCH_WORKERS) as pool:
@@ -69,17 +76,18 @@ def fetch_region_overview(tickers: list[str]) -> list[dict]:
 
         sector = info.get("sector")
         industry = info.get("industry")
-        results.append(
-            {
-                "symbol": symbol,
-                "name": info.get("longName") or info.get("shortName") or symbol,
-                "market_cap": market_cap,
-                "sector": sector,
-                "industry": industry,
-                "theme": classify(sector, industry),
-                "returns": _compute_returns(close),
-            }
-        )
+        stock = {
+            "symbol": symbol,
+            "name": info.get("longName") or info.get("shortName") or symbol,
+            "market_cap": market_cap,
+            "sector": sector,
+            "industry": industry,
+            "theme": classify(sector, industry),
+            "returns": _compute_returns(close),
+        }
+        if extra_info_fields:
+            stock["fundamentals"] = {field: info.get(field) for field in extra_info_fields}
+        results.append(stock)
     return results
 
 

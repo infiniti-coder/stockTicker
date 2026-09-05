@@ -1,7 +1,6 @@
 import json
 import logging
 from collections.abc import AsyncIterator
-from urllib.parse import urlparse
 
 from anthropic import AsyncAnthropic
 from sqlalchemy import select
@@ -12,54 +11,13 @@ from app.db import SessionLocal
 from app.models import ChatMessage
 
 from .prompts import SYSTEM_PROMPT
+from .sourcing import WEB_SEARCH_TOOL, collect_sources, rank_sources
 from .tools import get_stock_data
 
 logger = logging.getLogger(__name__)
 
 MODEL = "claude-opus-5"
 MAX_HISTORY_MESSAGES = 40  # cap how much prior conversation gets resent each turn
-MAX_SOURCES = 5  # shown under a reply, most-trusted first
-SOURCE_POOL_LIMIT = 25  # collect up to this many candidates before ranking, so trust-ranking has real choices
-WEB_SEARCH_TOOL = {"type": "web_search_20260318", "name": "web_search"}
-
-# Established financial publishers, exchanges, and data providers — preferred
-# over forums/blogs/community chart posts when picking which sources to show.
-# Not exhaustive; anything not on this list is still shown, just after these.
-TRUSTED_SOURCE_DOMAINS = (
-    "reuters.com",
-    "bloomberg.com",
-    "wsj.com",
-    "ft.com",
-    "cnbc.com",
-    "business-standard.com",
-    "economictimes.indiatimes.com",
-    "livemint.com",
-    "moneycontrol.com",
-    "nseindia.com",
-    "bseindia.com",
-    "finance.yahoo.com",
-    "marketwatch.com",
-    "forbes.com",
-    "ndtv.com",
-    "thehindu.com",
-    "financialexpress.com",
-    "hindustantimes.com",
-    "theweek.in",
-    "businesstoday.in",
-)
-
-
-def _is_trusted_domain(url: str) -> bool:
-    host = urlparse(url).netloc.removeprefix("www.")
-    return any(host == d or host.endswith(f".{d}") for d in TRUSTED_SOURCE_DOMAINS)
-
-
-def _rank_sources(sources: list[dict]) -> list[dict]:
-    """Most-trusted first (see TRUSTED_SOURCE_DOMAINS), preserving each
-    tier's original search-result order, then take the top MAX_SOURCES."""
-    trusted = [s for s in sources if _is_trusted_domain(s["url"])]
-    other = [s for s in sources if not _is_trusted_domain(s["url"])]
-    return (trusted + other)[:MAX_SOURCES]
 
 
 def list_messages(db: Session, session_id: str) -> list[ChatMessage]:
@@ -116,16 +74,7 @@ async def stream_chat_reply(session_id: str, user_text: str) -> AsyncIterator[tu
                     text_parts.append(text)
                     yield "delta", text
                 final = await message_stream.get_final_message()
-                for block in final.content:
-                    if len(sources) >= SOURCE_POOL_LIMIT:
-                        break
-                    if block.type == "web_search_tool_result" and isinstance(block.content, list):
-                        for result in block.content:
-                            if len(sources) >= SOURCE_POOL_LIMIT:
-                                break
-                            if result.url not in seen_urls:
-                                seen_urls.add(result.url)
-                                sources.append({"title": result.title, "url": result.url})
+                collect_sources(final, sources, seen_urls)
         except Exception:
             logger.exception("Chat reply generation failed")
             error_text = "\n\n(Something went wrong generating the rest of this reply.)"
@@ -133,7 +82,7 @@ async def stream_chat_reply(session_id: str, user_text: str) -> AsyncIterator[tu
             yield "delta", error_text
 
         full_text = "".join(text_parts)
-        top_sources = _rank_sources(sources)
+        top_sources = rank_sources(sources)
         _persist(db, session_id, "assistant", full_text, top_sources)
         yield "sources", json.dumps(top_sources)
     finally:

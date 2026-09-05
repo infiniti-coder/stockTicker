@@ -14,6 +14,7 @@ from app.market_data.kafka import make_consumer, make_producer
 from app.market_data.persistence_consumer import PERSISTENCE_GROUP_ID, PersistenceConsumer
 from app.market_data.producer import MockTickProducer
 from app.market_overview.router import router as market_overview_router
+from app.screener.router import router as screener_router
 from app.upstox_client import get_upstox_client
 from app.watchlist.router import router as watchlist_router
 from app.ws_gateway.router import router as ws_router
@@ -65,6 +66,7 @@ app.include_router(watchlist_router)
 app.include_router(ws_router)
 app.include_router(market_overview_router)
 app.include_router(chat_router)
+app.include_router(screener_router)
 
 
 @app.get("/health")

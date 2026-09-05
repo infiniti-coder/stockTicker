@@ -98,6 +98,53 @@ export interface ChatMessage {
   created_at: string;
 }
 
+/**
+ * Reads a fetch Response body as SSE `event:`/`data:` blocks, dispatching
+ * "delta" events (`{text}`) and "sources" events (`ChatSource[]`) as they
+ * arrive. Shared by postChatMessage and runScreener — both backend
+ * endpoints emit the identical wire format. Not EventSource-based —
+ * EventSource can't send a POST body or the X-Session-Id header.
+ */
+async function consumeSSE(
+  res: Response,
+  onDelta: (text: string) => void,
+  onSources: (sources: ChatSource[]) => void,
+): Promise<void> {
+  if (!res.ok || !res.body) {
+    throw new Error(`Request failed: ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundary: number;
+    while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+      const rawEvent = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+
+      let eventType = "message";
+      let data = "";
+      for (const line of rawEvent.split("\n")) {
+        if (line.startsWith("event: ")) eventType = line.slice(7);
+        else if (line.startsWith("data: ")) data = line.slice(6);
+      }
+      if (!data) continue;
+
+      if (eventType === "delta") {
+        onDelta((JSON.parse(data) as { text: string }).text);
+      } else if (eventType === "sources") {
+        onSources(JSON.parse(data) as ChatSource[]);
+      }
+    }
+  }
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     headers: { "Content-Type": "application/json", "X-Session-Id": getSessionId() },
@@ -141,53 +188,22 @@ export const api = {
 
   getChatHistory: () => apiFetch<ChatMessage[]>("/chat/messages"),
 
-  /**
-   * Streams a chat reply via SSE. Not EventSource-based — EventSource can't
-   * send a POST body or the X-Session-Id header — so this reads the raw
-   * fetch response stream and parses `event:`/`data:` blocks itself.
-   */
-  postChatMessage: async (
-    content: string,
-    onDelta: (text: string) => void,
-    onSources: (sources: ChatSource[]) => void,
-  ): Promise<void> => {
-    const res = await fetch(`${API_BASE}/chat/messages`, {
+  postChatMessage: (content: string, onDelta: (text: string) => void, onSources: (sources: ChatSource[]) => void) =>
+    fetch(`${API_BASE}/chat/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Session-Id": getSessionId() },
       body: JSON.stringify({ content }),
-    });
-    if (!res.ok || !res.body) {
-      throw new Error(`POST /chat/messages failed: ${res.status}`);
-    }
+    }).then((res) => consumeSSE(res, onDelta, onSources)),
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      let boundary: number;
-      while ((boundary = buffer.indexOf("\n\n")) !== -1) {
-        const rawEvent = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-
-        let eventType = "message";
-        let data = "";
-        for (const line of rawEvent.split("\n")) {
-          if (line.startsWith("event: ")) eventType = line.slice(7);
-          else if (line.startsWith("data: ")) data = line.slice(6);
-        }
-        if (!data) continue;
-
-        if (eventType === "delta") {
-          onDelta((JSON.parse(data) as { text: string }).text);
-        } else if (eventType === "sources") {
-          onSources(JSON.parse(data) as ChatSource[]);
-        }
-      }
-    }
-  },
+  runScreener: (
+    region: MarketOverviewRegion,
+    criteria: string,
+    onDelta: (text: string) => void,
+    onSources: (sources: ChatSource[]) => void,
+  ) =>
+    fetch(`${API_BASE}/screener/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Session-Id": getSessionId() },
+      body: JSON.stringify({ region, criteria }),
+    }).then((res) => consumeSSE(res, onDelta, onSources)),
 };

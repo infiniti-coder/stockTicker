@@ -9,6 +9,12 @@ from app.market_overview.service import fetch_full_history, fetch_region_overvie
 REGIONS: dict[str, list[str]] = {"india": universe.INDIA, "world": universe.WORLD}
 HISTORY_YEAR_STRIDE = 252  # ~1 trading year, keeps the summary light on context
 
+# Already sitting in the same yfinance .info dict fetch_region_overview
+# fetches for sector/industry/market_cap — free to include, and lets the
+# chat/screener agents ground "improving margins"-style claims in real
+# numbers instead of only whatever a web search happens to surface.
+FUNDAMENTAL_FIELDS = ("profitMargins", "revenueGrowth", "trailingPE", "returnOnEquity", "earningsGrowth")
+
 
 def _summarize_history(points: list[dict]) -> dict:
     if not points:
@@ -35,8 +41,9 @@ async def get_stock_data(region: str, symbol: str | None = None) -> str:
 
     Args:
         region: "india" or "world" — which stock universe to query. Returns
-            market cap, sector, theme, and period returns (1d/1w/1m/6m/1y/5y)
-            for every stock in that universe.
+            market cap, sector, theme, period returns (1d/1w/1m/6m/1y/5y),
+            and fundamentals (profit margin, revenue growth, trailing P/E,
+            ROE, earnings growth) for every stock in that universe.
         symbol: optional exact ticker (e.g. "RELIANCE.NS", "AAPL") already
             present in that region's universe — also returns a price-history
             summary (yearly closes + overall change since inception) for
@@ -46,7 +53,7 @@ async def get_stock_data(region: str, symbol: str | None = None) -> str:
     if tickers is None:
         return json.dumps({"error": "region must be 'india' or 'world'"})
 
-    stocks = await asyncio.to_thread(fetch_region_overview, tickers)
+    stocks = await asyncio.to_thread(fetch_region_overview, tickers, FUNDAMENTAL_FIELDS)
     result: dict = {"region": region, "stocks": stocks}
 
     if symbol:

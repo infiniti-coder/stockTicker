@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { ChatPanel } from "../components/ChatPanel";
 import { LoginButton } from "../components/LoginButton";
@@ -34,7 +35,12 @@ export function Dashboard() {
     <div className="dashboard-page">
       <header className="dashboard-header">
         <h1>stockTicker</h1>
-        <LoginButton />
+        <div className="dashboard-header-actions">
+          <Link to="/screener" className="header-nav-link">
+            Screener
+          </Link>
+          <LoginButton />
+        </div>
       </header>
 
       <div className="dashboard-layout">

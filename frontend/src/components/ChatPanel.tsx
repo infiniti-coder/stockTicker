@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { api, ChatMessage, ChatSource } from "../api/client";
 import { useChatHistory } from "../hooks/useChatHistory";
+import { StreamedAnswer } from "./StreamedAnswer";
 
 export function ChatPanel() {
   const { data: history, isLoading } = useChatHistory();
@@ -77,28 +78,9 @@ export function ChatPanel() {
             grounded in this app's own market data and real web sources, never a buy/sell recommendation.
           </p>
         ) : (
-          messages.map((m, i) => (
-            <div key={i} className={`chat-message chat-message-${m.role}`}>
-              <div className="chat-bubble">{m.content}</div>
-              {m.sources.length > 0 && (
-                <ul className="chat-sources">
-                  {m.sources.map((s) => (
-                    <li key={s.url}>
-                      <a href={s.url} target="_blank" rel="noreferrer">
-                        {s.title}
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          ))
+          messages.map((m, i) => <StreamedAnswer key={i} role={m.role} content={m.content} sources={m.sources} />)
         )}
-        {streaming && (
-          <div className="chat-message chat-message-assistant">
-            <div className="chat-bubble">{streamingText || "…"}</div>
-          </div>
-        )}
+        {streaming && <StreamedAnswer content={streamingText} />}
       </div>
       <form className="chat-input-row" onSubmit={handleSubmit}>
         <input
