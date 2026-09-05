@@ -88,6 +88,9 @@ from sector/industry strings, not a real thematic classifier). Clicking a
 tile fetches that symbol's full history via `yf.download(symbol,
 period="max")` and renders it as a line chart.
 
+<img width="1347" height="916" alt="image" src="https://github.com/user-attachments/assets/7e5a6a30-3854-47c5-b140-bec9e88c735c" />
+
+
 ## 5. Ask Claude & the screener agent
 
 Both features call Claude (`claude-opus-5` via the Anthropic SDK's
